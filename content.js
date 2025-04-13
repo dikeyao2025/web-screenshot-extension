@@ -6,6 +6,7 @@ class ScreenshotContent {
     this.html2canvas = null;
     this.previewUI = null;
     this.isCapturing = false;
+    this.selectedArea = null;
     this.initMessageListener();
     this.loadHtml2Canvas();
   }
@@ -38,24 +39,8 @@ class ScreenshotContent {
   async loadHtml2Canvas() {
     try {
       // 首先尝试加载本地文件
-      const localScript = document.createElement('script');
-      localScript.src = chrome.runtime.getURL('lib/html2canvas.min.js');
-      
-      const loadPromise = new Promise((resolve, reject) => {
-        localScript.onload = () => {
-          if (typeof window.html2canvas === 'function') {
-            console.log('[网页截图] html2canvas本地加载成功');
-            this.html2canvas = window.html2canvas;
-            resolve();
-          } else {
-            reject(new Error('本地html2canvas加载成功但未正确初始化'));
-          }
-        };
-        localScript.onerror = () => reject(new Error('本地html2canvas加载失败'));
-      });
-
-      document.head.appendChild(localScript);
-      await loadPromise;
+      await this.loadScript(chrome.runtime.getURL('lib/html2canvas.min.js'));
+      console.log('[网页截图] html2canvas本地加载成功');
     } catch (error) {
       console.warn('[网页截图] 本地加载失败，尝试从CDN加载:', error);
       
@@ -68,31 +53,52 @@ class ScreenshotContent {
 
       for (const cdnUrl of cdnUrls) {
         try {
-          const script = document.createElement('script');
-          script.src = cdnUrl;
-          
-          const cdnLoadPromise = new Promise((resolve, reject) => {
-            script.onload = () => {
-              if (typeof window.html2canvas === 'function') {
-                console.log('[网页截图] html2canvas从CDN加载成功:', cdnUrl);
-                this.html2canvas = window.html2canvas;
-                resolve();
-              } else {
-                reject(new Error('CDN html2canvas加载成功但未正确初始化'));
-              }
-            };
-            script.onerror = () => reject(new Error(`CDN ${cdnUrl} 加载失败`));
-          });
-
-          document.head.appendChild(script);
-          await cdnLoadPromise;
-          break; // 成功加载后退出循环
+          await this.loadScript(cdnUrl);
+          console.log('[网页截图] html2canvas从CDN加载成功:', cdnUrl);
+          break;
         } catch (cdnError) {
           console.warn(`[网页截图] CDN ${cdnUrl} 加载失败:`, cdnError);
           continue;
         }
       }
     }
+
+    // 验证html2canvas是否正确加载
+    if (typeof window.html2canvas !== 'function') {
+      throw new Error('html2canvas加载失败');
+    }
+    this.html2canvas = window.html2canvas;
+  }
+
+  // 加载脚本
+  loadScript(url) {
+    return new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      script.src = url;
+      
+      const timeout = setTimeout(() => {
+        reject(new Error('加载超时'));
+      }, 10000);
+
+      script.onload = () => {
+        clearTimeout(timeout);
+        // 等待一小段时间确保脚本完全初始化
+        setTimeout(() => {
+          if (typeof window.html2canvas === 'function') {
+            resolve();
+          } else {
+            reject(new Error('脚本加载成功但未正确初始化'));
+          }
+        }, 100);
+      };
+
+      script.onerror = () => {
+        clearTimeout(timeout);
+        reject(new Error('脚本加载失败'));
+      };
+
+      document.head.appendChild(script);
+    });
   }
 
   // 处理截图请求
@@ -130,7 +136,7 @@ class ScreenshotContent {
       }
 
       this.hideProgress();
-      this.showPreview(imageData);
+      await this.showPreview(imageData);
     } catch (error) {
       console.error('[截图] 截图失败:', error);
       this.hideProgress();
@@ -146,32 +152,75 @@ class ScreenshotContent {
       logging: false,
       useCORS: true,
       allowTaint: true,
-      backgroundColor: null
+      backgroundColor: null,
+      scale: window.devicePixelRatio,
+      scrollX: window.scrollX,
+      scrollY: window.scrollY,
+      windowWidth: document.documentElement.clientWidth,
+      windowHeight: document.documentElement.clientHeight
     };
 
     const canvas = await this.html2canvas(document.documentElement, options);
-    return canvas.toDataURL();
+    return canvas.toDataURL('image/png');
   }
 
   // 截取整个页面
   async captureFull() {
+    // 保存原始滚动位置
+    const originalScrollPos = {
+      x: window.scrollX,
+      y: window.scrollY
+    };
+
+    // 获取页面完整尺寸
+    const fullHeight = Math.max(
+      document.documentElement.scrollHeight,
+      document.documentElement.offsetHeight,
+      document.documentElement.clientHeight
+    );
+    const fullWidth = Math.max(
+      document.documentElement.scrollWidth,
+      document.documentElement.offsetWidth,
+      document.documentElement.clientWidth
+    );
+
     const options = {
       logging: false,
       useCORS: true,
       allowTaint: true,
       backgroundColor: null,
-      height: Math.max(
-        document.documentElement.clientHeight,
-        document.documentElement.scrollHeight
-      ),
-      windowHeight: Math.max(
-        document.documentElement.clientHeight,
-        document.documentElement.scrollHeight
-      )
+      scale: window.devicePixelRatio,
+      width: fullWidth,
+      height: fullHeight,
+      scrollX: 0,
+      scrollY: 0,
+      windowWidth: fullWidth,
+      windowHeight: fullHeight,
+      x: 0,
+      y: 0
     };
 
-    const canvas = await this.html2canvas(document.documentElement, options);
-    return canvas.toDataURL();
+    try {
+      // 临时修改body样式以防止滚动
+      const originalStyle = document.body.style.cssText;
+      document.body.style.overflow = 'hidden';
+      document.body.style.height = '${fullHeight}px';
+
+      const canvas = await this.html2canvas(document.documentElement, options);
+      
+      // 恢复原始样式
+      document.body.style.cssText = originalStyle;
+      
+      // 恢复滚动位置
+      window.scrollTo(originalScrollPos.x, originalScrollPos.y);
+
+      return canvas.toDataURL('image/png');
+    } catch (error) {
+      // 确保在出错时也恢复原始状态
+      document.body.style.cssText = originalStyle;
+      window.scrollTo(originalScrollPos.x, originalScrollPos.y);
+      throw error;
+    }
   }
 
   // 截取选定区域
@@ -180,27 +229,37 @@ class ScreenshotContent {
       throw new Error('无效的截图区域');
     }
 
+    // 计算实际的滚动位置和区域大小
+    const scale = window.devicePixelRatio;
+    const scrollX = window.scrollX;
+    const scrollY = window.scrollY;
+
     const options = {
       logging: false,
       useCORS: true,
       allowTaint: true,
       backgroundColor: null,
-      x: area.left,
-      y: area.top,
+      scale: scale,
+      scrollX: scrollX,
+      scrollY: scrollY,
       width: area.width,
-      height: area.height
+      height: area.height,
+      x: area.left + scrollX,
+      y: area.top + scrollY,
+      windowWidth: document.documentElement.clientWidth,
+      windowHeight: document.documentElement.clientHeight
     };
 
     const canvas = await this.html2canvas(document.documentElement, options);
-    return canvas.toDataURL();
+    return canvas.toDataURL('image/png');
   }
 
   // 显示预览
-  showPreview(dataUrl) {
+  async showPreview(dataUrl) {
     if (!this.previewUI) {
       this.previewUI = new PreviewUI();
     }
-    this.previewUI.show(dataUrl);
+    await this.previewUI.show(dataUrl);
   }
 
   // 开始区域选择
@@ -305,12 +364,22 @@ class PreviewUI {
     document.body.appendChild(this.container);
   }
 
-  show(dataUrl) {
-    this.image.src = dataUrl;
-    this.container.style.display = 'flex';
-    setTimeout(() => {
-      this.container.style.opacity = '1';
-    }, 0);
+  async show(dataUrl) {
+    return new Promise((resolve, reject) => {
+      this.image.onload = () => {
+        this.container.style.display = 'flex';
+        setTimeout(() => {
+          this.container.style.opacity = '1';
+          resolve();
+        }, 0);
+      };
+      
+      this.image.onerror = () => {
+        reject(new Error('图片加载失败'));
+      };
+      
+      this.image.src = dataUrl;
+    });
   }
 
   hide() {
@@ -438,7 +507,8 @@ class AreaSelector {
       left: rect.left + 'px',
       top: rect.top + 'px',
       width: rect.width + 'px',
-      height: rect.height + 'px'
+      height: rect.height + 'px',
+      display: 'block'
     });
   }
 
@@ -450,7 +520,8 @@ class AreaSelector {
     
     Object.assign(this.sizeInfo.style, {
       left: infoLeft + 'px',
-      top: infoTop + 'px'
+      top: infoTop + 'px',
+      display: 'block'
     });
   }
 
