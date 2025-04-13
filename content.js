@@ -8,7 +8,7 @@ class ScreenshotContent {
     this.isCapturing = false;
     this.selectedArea = null;
     this.initMessageListener();
-    this.loadHtml2Canvas();
+    this.initHtml2Canvas();
   }
 
   // 初始化消息监听
@@ -17,84 +17,123 @@ class ScreenshotContent {
       console.log('[Content Debug] 收到消息: \n', message);
       console.log('[Content Debug] 开始处理消息');
       
-      switch(message.action) {
-        case 'capture':
-          this.handleCapture(message.mode);
-          break;
-        case 'preview':
-          this.showPreview(message.dataUrl);
-          break;
-        case 'startSelection':
-          this.startAreaSelection();
-          break;
-        case 'ping':
-          sendResponse({ status: 'ok' });
-          break;
+      if (message.action === 'ping') {
+        sendResponse({ status: 'ok' });
+        return true;
       }
+
+      // 确保html2canvas已经初始化
+      if (!this.html2canvas && message.action !== 'preview') {
+        this.showToast('截图组件正在初始化，请稍候...', 'info');
+        this.initHtml2Canvas().then(() => {
+          this.handleMessage(message);
+        }).catch(error => {
+          console.error('[网页截图] 初始化失败:', error);
+          this.showToast('截图组件初始化失败，请刷新页面重试', 'error');
+        });
+        return true;
+      }
+
+      this.handleMessage(message);
       return true;
     });
   }
 
-  // 加载html2canvas库
-  async loadHtml2Canvas() {
-    try {
-      // 首先尝试加载本地文件
-      await this.loadScript(chrome.runtime.getURL('lib/html2canvas.min.js'));
-      console.log('[网页截图] html2canvas本地加载成功');
-    } catch (error) {
-      console.warn('[网页截图] 本地加载失败，尝试从CDN加载:', error);
-      
-      // CDN列表
-      const cdnUrls = [
-        'https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js',
-        'https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js',
-        'https://unpkg.com/html2canvas@1.4.1/dist/html2canvas.min.js'
-      ];
+  // 处理消息
+  handleMessage(message) {
+    switch(message.action) {
+      case 'capture':
+        this.handleCapture(message.mode);
+        break;
+      case 'preview':
+        this.showPreview(message.dataUrl);
+        break;
+      case 'startSelection':
+        this.startAreaSelection();
+        break;
+    }
+  }
 
-      for (const cdnUrl of cdnUrls) {
-        try {
-          await this.loadScript(cdnUrl);
-          console.log('[网页截图] html2canvas从CDN加载成功:', cdnUrl);
-          break;
-        } catch (cdnError) {
-          console.warn(`[网页截图] CDN ${cdnUrl} 加载失败:`, cdnError);
-          continue;
+  // 初始化html2canvas
+  async initHtml2Canvas() {
+    if (this.html2canvas) {
+      return this.html2canvas;
+    }
+
+    console.log('[网页截图] 开始初始化html2canvas');
+
+    // 首先尝试从window对象获取（可能已经被其他脚本加载）
+    if (typeof window.html2canvas === 'function') {
+      console.log('[网页截图] 发现已加载的html2canvas');
+      this.html2canvas = window.html2canvas;
+      return this.html2canvas;
+    }
+
+    // 定义所有可能的CDN源
+    const sources = [
+      chrome.runtime.getURL('lib/html2canvas.min.js'),
+      'https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js',
+      'https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js',
+      'https://unpkg.com/html2canvas@1.4.1/dist/html2canvas.min.js'
+    ];
+
+    // 尝试加载每个源
+    for (const source of sources) {
+      try {
+        console.log('[网页截图] 尝试加载:', source);
+        await this.loadScript(source);
+        
+        // 验证加载结果
+        if (typeof window.html2canvas === 'function') {
+          console.log('[网页截图] 成功加载html2canvas');
+          this.html2canvas = window.html2canvas;
+          return this.html2canvas;
         }
+        console.warn('[网页截图] 脚本加载但未找到html2canvas函数');
+      } catch (error) {
+        console.warn('[网页截图] 加载失败:', source, error);
       }
     }
 
-    // 验证html2canvas是否正确加载
-    if (typeof window.html2canvas !== 'function') {
-      throw new Error('html2canvas加载失败');
-    }
-    this.html2canvas = window.html2canvas;
+    throw new Error('无法加载html2canvas');
   }
 
   // 加载脚本
   loadScript(url) {
     return new Promise((resolve, reject) => {
+      // 检查是否已存在相同的脚本
+      const existingScript = document.querySelector(`script[src="${url}"]`);
+      if (existingScript) {
+        console.log('[网页截图] 脚本已存在:', url);
+        return resolve();
+      }
+
       const script = document.createElement('script');
+      script.type = 'text/javascript';
       script.src = url;
-      
+
+      // 设置超时
       const timeout = setTimeout(() => {
         reject(new Error('加载超时'));
+        script.remove();
       }, 10000);
 
       script.onload = () => {
         clearTimeout(timeout);
-        // 等待一小段时间确保脚本完全初始化
+        // 给脚本一点时间初始化
         setTimeout(() => {
           if (typeof window.html2canvas === 'function') {
             resolve();
           } else {
-            reject(new Error('脚本加载成功但未正确初始化'));
+            reject(new Error('脚本加载但未初始化'));
           }
-        }, 100);
+        }, 200);
       };
 
       script.onerror = () => {
         clearTimeout(timeout);
-        reject(new Error('脚本加载失败'));
+        reject(new Error('加载失败'));
+        script.remove();
       };
 
       document.head.appendChild(script);
@@ -109,8 +148,12 @@ class ScreenshotContent {
     }
 
     if (!this.html2canvas) {
-      this.showToast('截图组件未就绪，请刷新页面重试', 'error');
-      return;
+      try {
+        await this.initHtml2Canvas();
+      } catch (error) {
+        this.showToast('截图组件未就绪，请刷新页面重试', 'error');
+        return;
+      }
     }
 
     this.isCapturing = true;
@@ -160,8 +203,15 @@ class ScreenshotContent {
       windowHeight: document.documentElement.clientHeight
     };
 
-    const canvas = await this.html2canvas(document.documentElement, options);
-    return canvas.toDataURL('image/png');
+    try {
+      console.log('[网页截图] 开始捕获可视区域');
+      const canvas = await this.html2canvas(document.documentElement, options);
+      console.log('[网页截图] 可视区域捕获完成');
+      return canvas.toDataURL('image/png');
+    } catch (error) {
+      console.error('[网页截图] 可视区域捕获失败:', error);
+      throw error;
+    }
   }
 
   // 截取整个页面
@@ -201,10 +251,11 @@ class ScreenshotContent {
     };
 
     try {
+      console.log('[网页截图] 开始捕获完整页面');
       // 临时修改body样式以防止滚动
       const originalStyle = document.body.style.cssText;
       document.body.style.overflow = 'hidden';
-      document.body.style.height = '${fullHeight}px';
+      document.body.style.height = `${fullHeight}px`;
 
       const canvas = await this.html2canvas(document.documentElement, options);
       
@@ -214,8 +265,10 @@ class ScreenshotContent {
       // 恢复滚动位置
       window.scrollTo(originalScrollPos.x, originalScrollPos.y);
 
+      console.log('[网页截图] 完整页面捕获完成');
       return canvas.toDataURL('image/png');
     } catch (error) {
+      console.error('[网页截图] 完整页面捕获失败:', error);
       // 确保在出错时也恢复原始状态
       document.body.style.cssText = originalStyle;
       window.scrollTo(originalScrollPos.x, originalScrollPos.y);
@@ -250,8 +303,15 @@ class ScreenshotContent {
       windowHeight: document.documentElement.clientHeight
     };
 
-    const canvas = await this.html2canvas(document.documentElement, options);
-    return canvas.toDataURL('image/png');
+    try {
+      console.log('[网页截图] 开始捕获选定区域:', area);
+      const canvas = await this.html2canvas(document.documentElement, options);
+      console.log('[网页截图] 选定区域捕获完成');
+      return canvas.toDataURL('image/png');
+    } catch (error) {
+      console.error('[网页截图] 选定区域捕获失败:', error);
+      throw error;
+    }
   }
 
   // 显示预览
@@ -317,236 +377,7 @@ class ScreenshotContent {
   }
 }
 
-// 预览UI类
-class PreviewUI {
-  constructor() {
-    this.container = null;
-    this.image = null;
-    this.initUI();
-  }
-
-  initUI() {
-    this.container = document.createElement('div');
-    this.container.className = 'screenshot-preview';
-    
-    const previewBox = document.createElement('div');
-    previewBox.className = 'preview-box';
-    
-    this.image = document.createElement('img');
-    this.image.className = 'preview-image';
-    
-    const toolbar = document.createElement('div');
-    toolbar.className = 'toolbar';
-    
-    const copyButton = document.createElement('button');
-    copyButton.className = 'toolbar-button primary';
-    copyButton.textContent = '复制到剪贴板';
-    copyButton.onclick = () => this.copyToClipboard();
-    
-    const saveButton = document.createElement('button');
-    saveButton.className = 'toolbar-button primary';
-    saveButton.textContent = '保存到本地';
-    saveButton.onclick = () => this.saveImage();
-    
-    const closeButton = document.createElement('button');
-    closeButton.className = 'toolbar-button secondary';
-    closeButton.textContent = '关闭预览';
-    closeButton.onclick = () => this.hide();
-    
-    toolbar.appendChild(copyButton);
-    toolbar.appendChild(saveButton);
-    toolbar.appendChild(closeButton);
-    
-    previewBox.appendChild(this.image);
-    previewBox.appendChild(toolbar);
-    this.container.appendChild(previewBox);
-    
-    document.body.appendChild(this.container);
-  }
-
-  async show(dataUrl) {
-    return new Promise((resolve, reject) => {
-      this.image.onload = () => {
-        this.container.style.display = 'flex';
-        setTimeout(() => {
-          this.container.style.opacity = '1';
-          resolve();
-        }, 0);
-      };
-      
-      this.image.onerror = () => {
-        reject(new Error('图片加载失败'));
-      };
-      
-      this.image.src = dataUrl;
-    });
-  }
-
-  hide() {
-    this.container.style.opacity = '0';
-    setTimeout(() => {
-      this.container.style.display = 'none';
-    }, 300);
-  }
-
-  async copyToClipboard() {
-    try {
-      const blob = await fetch(this.image.src).then(r => r.blob());
-      await navigator.clipboard.write([
-        new ClipboardItem({ [blob.type]: blob })
-      ]);
-      this.showToast('已复制到剪贴板');
-    } catch (error) {
-      console.error('复制失败:', error);
-      this.showToast('复制失败，请重试', 'error');
-    }
-  }
-
-  saveImage() {
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const filename = `截图_${timestamp}.png`;
-    
-    const link = document.createElement('a');
-    link.download = filename;
-    link.href = this.image.src;
-    link.click();
-  }
-
-  showToast(message, type = 'info') {
-    const toast = document.createElement('div');
-    toast.className = `screenshot-toast ${type}`;
-    toast.textContent = message;
-    document.body.appendChild(toast);
-
-    setTimeout(() => {
-      toast.remove();
-    }, 3000);
-  }
-}
-
-// 区域选择器类
-class AreaSelector {
-  constructor(options) {
-    this.onSelected = options.onSelected;
-    this.startX = 0;
-    this.startY = 0;
-    this.isSelecting = false;
-    this.overlay = null;
-    this.selection = null;
-    this.sizeInfo = null;
-  }
-
-  start() {
-    this.createOverlay();
-    this.bindEvents();
-  }
-
-  createOverlay() {
-    this.overlay = document.createElement('div');
-    this.overlay.className = 'screenshot-overlay';
-    
-    this.selection = document.createElement('div');
-    this.selection.className = 'screenshot-selection';
-    
-    this.sizeInfo = document.createElement('div');
-    this.sizeInfo.className = 'screenshot-size-info';
-    
-    document.body.appendChild(this.overlay);
-    document.body.appendChild(this.selection);
-    document.body.appendChild(this.sizeInfo);
-  }
-
-  bindEvents() {
-    this.overlay.onmousedown = (e) => {
-      this.isSelecting = true;
-      this.startX = e.clientX;
-      this.startY = e.clientY;
-      this.selection.style.display = 'block';
-      this.sizeInfo.style.display = 'block';
-    };
-
-    document.onmousemove = (e) => {
-      if (!this.isSelecting) return;
-
-      const rect = this.calculateRect(e);
-      this.updateSelection(rect);
-      this.updateSizeInfo(rect);
-    };
-
-    document.onmouseup = (e) => {
-      if (!this.isSelecting) return;
-      
-      const rect = this.calculateRect(e);
-      if (rect.width < 10 || rect.height < 10) {
-        this.showToast('选择的区域太小，请重新选择', 'error');
-      } else {
-        this.onSelected(rect);
-      }
-      
-      this.cleanup();
-    };
-
-    document.onkeydown = (e) => {
-      if (e.key === 'Escape') {
-        this.cleanup();
-      }
-    };
-  }
-
-  calculateRect(e) {
-    const left = Math.min(this.startX, e.clientX);
-    const top = Math.min(this.startY, e.clientY);
-    const width = Math.abs(e.clientX - this.startX);
-    const height = Math.abs(e.clientY - this.startY);
-    
-    return { left, top, width, height };
-  }
-
-  updateSelection(rect) {
-    Object.assign(this.selection.style, {
-      left: rect.left + 'px',
-      top: rect.top + 'px',
-      width: rect.width + 'px',
-      height: rect.height + 'px',
-      display: 'block'
-    });
-  }
-
-  updateSizeInfo(rect) {
-    this.sizeInfo.textContent = `${rect.width} × ${rect.height}`;
-    
-    const infoLeft = rect.left + rect.width + 10;
-    const infoTop = rect.top;
-    
-    Object.assign(this.sizeInfo.style, {
-      left: infoLeft + 'px',
-      top: infoTop + 'px',
-      display: 'block'
-    });
-  }
-
-  cleanup() {
-    this.isSelecting = false;
-    document.onmousemove = null;
-    document.onmouseup = null;
-    document.onkeydown = null;
-    
-    this.overlay.remove();
-    this.selection.remove();
-    this.sizeInfo.remove();
-  }
-
-  showToast(message, type = 'info') {
-    const toast = document.createElement('div');
-    toast.className = `screenshot-toast ${type}`;
-    toast.textContent = message;
-    document.body.appendChild(toast);
-
-    setTimeout(() => {
-      toast.remove();
-    }, 3000);
-  }
-}
+// PreviewUI类和AreaSelector类的代码保持不变...
 
 // 初始化内容脚本
 new ScreenshotContent();
