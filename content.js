@@ -22,25 +22,24 @@ class ScreenshotContent {
         return true;
       }
 
-      // 确保html2canvas已经初始化
-      if (!this.html2canvas && message.action !== 'preview') {
-        this.showToast('截图组件正在初始化，请稍候...', 'info');
-        this.initHtml2Canvas().then(() => {
-          this.handleMessage(message);
-        }).catch(error => {
-          console.error('[网页截图] 初始化失败:', error);
-          this.showToast('截图组件初始化失败，请刷新页面重试', 'error');
-        });
-        return true;
-      }
-
       this.handleMessage(message);
       return true;
     });
   }
 
   // 处理消息
-  handleMessage(message) {
+  async handleMessage(message) {
+    // 确保html2canvas已经初始化
+    if (!this.html2canvas && message.action !== 'preview') {
+      try {
+        await this.initHtml2Canvas();
+      } catch (error) {
+        console.error('[网页截图] 初始化失败:', error);
+        this.showToast('截图组件初始化失败，请刷新页面重试', 'error');
+        return;
+      }
+    }
+
     switch(message.action) {
       case 'capture':
         this.handleCapture(message.mode);
@@ -62,82 +61,34 @@ class ScreenshotContent {
 
     console.log('[网页截图] 开始初始化html2canvas');
 
-    // 首先尝试从window对象获取（可能已经被其他脚本加载）
-    if (typeof window.html2canvas === 'function') {
-      console.log('[网页截图] 发现已加载的html2canvas');
-      this.html2canvas = window.html2canvas;
-      return this.html2canvas;
-    }
-
-    // 定义所有可能的CDN源
-    const sources = [
-      chrome.runtime.getURL('lib/html2canvas.min.js'),
-      'https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js',
-      'https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js',
-      'https://unpkg.com/html2canvas@1.4.1/dist/html2canvas.min.js'
-    ];
-
-    // 尝试加载每个源
-    for (const source of sources) {
-      try {
-        console.log('[网页截图] 尝试加载:', source);
-        await this.loadScript(source);
-        
-        // 验证加载结果
-        if (typeof window.html2canvas === 'function') {
-          console.log('[网页截图] 成功加载html2canvas');
-          this.html2canvas = window.html2canvas;
-          return this.html2canvas;
-        }
-        console.warn('[网页截图] 脚本加载但未找到html2canvas函数');
-      } catch (error) {
-        console.warn('[网页截图] 加载失败:', source, error);
-      }
-    }
-
-    throw new Error('无法加载html2canvas');
-  }
-
-  // 加载脚本
-  loadScript(url) {
-    return new Promise((resolve, reject) => {
-      // 检查是否已存在相同的脚本
-      const existingScript = document.querySelector(`script[src="${url}"]`);
-      if (existingScript) {
-        console.log('[网页截图] 脚本已存在:', url);
-        return resolve();
-      }
-
+    try {
+      // 加载本地版本
       const script = document.createElement('script');
-      script.type = 'text/javascript';
-      script.src = url;
-
-      // 设置超时
-      const timeout = setTimeout(() => {
-        reject(new Error('加载超时'));
-        script.remove();
-      }, 10000);
-
-      script.onload = () => {
-        clearTimeout(timeout);
-        // 给脚本一点时间初始化
-        setTimeout(() => {
-          if (typeof window.html2canvas === 'function') {
-            resolve();
-          } else {
-            reject(new Error('脚本加载但未初始化'));
-          }
-        }, 200);
-      };
-
-      script.onerror = () => {
-        clearTimeout(timeout);
-        reject(new Error('加载失败'));
-        script.remove();
-      };
-
-      document.head.appendChild(script);
-    });
+      script.src = chrome.runtime.getURL('lib/html2canvas.js');
+      
+      await new Promise((resolve, reject) => {
+        script.onload = () => {
+          // 给脚本一点时间初始化
+          setTimeout(() => {
+            if (typeof window.html2canvas === 'function') {
+              console.log('[网页截图] html2canvas加载成功');
+              this.html2canvas = window.html2canvas;
+              resolve();
+            } else {
+              reject(new Error('html2canvas未正确初始化'));
+            }
+          }, 100);
+        };
+        
+        script.onerror = () => reject(new Error('html2canvas加载失败'));
+        document.head.appendChild(script);
+      });
+      
+      return this.html2canvas;
+    } catch (error) {
+      console.error('[网页截图] html2canvas加载失败:', error);
+      throw error;
+    }
   }
 
   // 处理截图请求
@@ -145,15 +96,6 @@ class ScreenshotContent {
     if (this.isCapturing) {
       this.showToast('正在截图中，请稍候...', 'info');
       return;
-    }
-
-    if (!this.html2canvas) {
-      try {
-        await this.initHtml2Canvas();
-      } catch (error) {
-        this.showToast('截图组件未就绪，请刷新页面重试', 'error');
-        return;
-      }
     }
 
     this.isCapturing = true;
@@ -191,89 +133,48 @@ class ScreenshotContent {
 
   // 截取可视区域
   async captureVisible() {
+    console.log('[网页截图] 开始捕获可视区域');
+    
     const options = {
       logging: false,
       useCORS: true,
       allowTaint: true,
       backgroundColor: null,
       scale: window.devicePixelRatio,
-      scrollX: window.scrollX,
-      scrollY: window.scrollY,
-      windowWidth: document.documentElement.clientWidth,
-      windowHeight: document.documentElement.clientHeight
+      width: document.documentElement.clientWidth,
+      height: document.documentElement.clientHeight
     };
 
-    try {
-      console.log('[网页截图] 开始捕获可视区域');
-      const canvas = await this.html2canvas(document.documentElement, options);
-      console.log('[网页截图] 可视区域捕获完成');
-      return canvas.toDataURL('image/png');
-    } catch (error) {
-      console.error('[网页截图] 可视区域捕获失败:', error);
-      throw error;
-    }
+    const canvas = await this.html2canvas(document.documentElement, options);
+    console.log('[网页截图] 可视区域捕获完成');
+    return canvas.toDataURL('image/png');
   }
 
   // 截取整个页面
   async captureFull() {
-    // 保存原始滚动位置
-    const originalScrollPos = {
-      x: window.scrollX,
-      y: window.scrollY
-    };
-
-    // 获取页面完整尺寸
-    const fullHeight = Math.max(
-      document.documentElement.scrollHeight,
-      document.documentElement.offsetHeight,
-      document.documentElement.clientHeight
-    );
-    const fullWidth = Math.max(
-      document.documentElement.scrollWidth,
-      document.documentElement.offsetWidth,
-      document.documentElement.clientWidth
-    );
-
+    console.log('[网页截图] 开始捕获完整页面');
+    
     const options = {
       logging: false,
       useCORS: true,
       allowTaint: true,
       backgroundColor: null,
       scale: window.devicePixelRatio,
-      width: fullWidth,
-      height: fullHeight,
-      scrollX: 0,
-      scrollY: 0,
-      windowWidth: fullWidth,
-      windowHeight: fullHeight,
-      x: 0,
-      y: 0
+      width: Math.max(
+        document.documentElement.scrollWidth,
+        document.documentElement.offsetWidth,
+        document.documentElement.clientWidth
+      ),
+      height: Math.max(
+        document.documentElement.scrollHeight,
+        document.documentElement.offsetHeight,
+        document.documentElement.clientHeight
+      )
     };
 
-    try {
-      console.log('[网页截图] 开始捕获完整页面');
-      // 临时修改body样式以防止滚动
-      const originalStyle = document.body.style.cssText;
-      document.body.style.overflow = 'hidden';
-      document.body.style.height = `${fullHeight}px`;
-
-      const canvas = await this.html2canvas(document.documentElement, options);
-      
-      // 恢复原始样式
-      document.body.style.cssText = originalStyle;
-      
-      // 恢复滚动位置
-      window.scrollTo(originalScrollPos.x, originalScrollPos.y);
-
-      console.log('[网页截图] 完整页面捕获完成');
-      return canvas.toDataURL('image/png');
-    } catch (error) {
-      console.error('[网页截图] 完整页面捕获失败:', error);
-      // 确保在出错时也恢复原始状态
-      document.body.style.cssText = originalStyle;
-      window.scrollTo(originalScrollPos.x, originalScrollPos.y);
-      throw error;
-    }
+    const canvas = await this.html2canvas(document.documentElement, options);
+    console.log('[网页截图] 完整页面捕获完成');
+    return canvas.toDataURL('image/png');
   }
 
   // 截取选定区域
@@ -282,36 +183,23 @@ class ScreenshotContent {
       throw new Error('无效的截图区域');
     }
 
-    // 计算实际的滚动位置和区域大小
-    const scale = window.devicePixelRatio;
-    const scrollX = window.scrollX;
-    const scrollY = window.scrollY;
-
+    console.log('[网页截图] 开始捕获选定区域:', area);
+    
     const options = {
       logging: false,
       useCORS: true,
       allowTaint: true,
       backgroundColor: null,
-      scale: scale,
-      scrollX: scrollX,
-      scrollY: scrollY,
+      scale: window.devicePixelRatio,
       width: area.width,
       height: area.height,
-      x: area.left + scrollX,
-      y: area.top + scrollY,
-      windowWidth: document.documentElement.clientWidth,
-      windowHeight: document.documentElement.clientHeight
+      x: area.left,
+      y: area.top
     };
 
-    try {
-      console.log('[网页截图] 开始捕获选定区域:', area);
-      const canvas = await this.html2canvas(document.documentElement, options);
-      console.log('[网页截图] 选定区域捕获完成');
-      return canvas.toDataURL('image/png');
-    } catch (error) {
-      console.error('[网页截图] 选定区域捕获失败:', error);
-      throw error;
-    }
+    const canvas = await this.html2canvas(document.documentElement, options);
+    console.log('[网页截图] 选定区域捕获完成');
+    return canvas.toDataURL('image/png');
   }
 
   // 显示预览
