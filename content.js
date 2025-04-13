@@ -8,9 +8,7 @@ class ScreenshotContent {
     this.isCapturing = false;
     this.selectedArea = null;
     this.initMessageListener();
-    this.initHtml2Canvas().catch(error => {
-      console.error('[网页截图] 初始化失败:', error);
-    });
+    this.loadHtml2Canvas();
   }
 
   // 初始化消息监听
@@ -35,13 +33,74 @@ class ScreenshotContent {
     });
   }
 
+  // 加载html2canvas
+  async loadHtml2Canvas() {
+    console.log('[网页截图] 开始加载html2canvas');
+    
+    try {
+      // 检查是否已经加载
+      if (document.querySelector('script[src*="html2canvas.js"]')) {
+        console.log('[网页截图] html2canvas脚本已存在');
+        await this.waitForHtml2Canvas();
+        return;
+      }
+
+      // 创建script标签
+      const script = document.createElement('script');
+      script.src = chrome.runtime.getURL('lib/html2canvas.js');
+      
+      // 等待脚本加载完成
+      await new Promise((resolve, reject) => {
+        script.onload = async () => {
+          console.log('[网页截图] html2canvas脚本加载完成');
+          try {
+            await this.waitForHtml2Canvas();
+            resolve();
+          } catch (error) {
+            reject(error);
+          }
+        };
+        
+        script.onerror = () => {
+          reject(new Error('html2canvas脚本加载失败'));
+        };
+
+        document.head.appendChild(script);
+      });
+
+      console.log('[网页截图] html2canvas初始化成功');
+    } catch (error) {
+      console.error('[网页截图] html2canvas加载失败:', error);
+      throw error;
+    }
+  }
+
+  // 等待html2canvas初始化
+  async waitForHtml2Canvas(timeout = 5000) {
+    console.log('[网页截图] 等待html2canvas初始化');
+    
+    const startTime = Date.now();
+    
+    while (Date.now() - startTime < timeout) {
+      if (typeof window.html2canvas === 'function') {
+        this.html2canvas = window.html2canvas;
+        console.log('[网页截图] html2canvas已就绪');
+        return;
+      }
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    
+    throw new Error('html2canvas初始化超时');
+  }
+
   // 处理消息
   async handleMessage(message) {
     console.log('[网页截图] 处理消息:', message.action);
 
     try {
+      // 确保html2canvas已加载
       if (!this.html2canvas) {
-        await this.initHtml2Canvas();
+        await this.loadHtml2Canvas();
       }
 
       switch(message.action) {
@@ -61,53 +120,6 @@ class ScreenshotContent {
     }
   }
 
-  // 初始化html2canvas
-  async initHtml2Canvas() {
-    if (this.html2canvas) {
-      console.log('[网页截图] html2canvas已初始化');
-      return this.html2canvas;
-    }
-
-    console.log('[网页截图] 开始初始化html2canvas');
-
-    return new Promise((resolve, reject) => {
-      const script = document.createElement('script');
-      script.src = chrome.runtime.getURL('lib/html2canvas.js');
-      
-      const timeout = setTimeout(() => {
-        reject(new Error('html2canvas加载超时'));
-      }, 10000);
-
-      script.onload = () => {
-        clearTimeout(timeout);
-        // 等待html2canvas真正初始化完成
-        const checkInterval = setInterval(() => {
-          if (typeof window.html2canvas === 'function') {
-            clearInterval(checkInterval);
-            console.log('[网页截图] html2canvas初始化成功');
-            this.html2canvas = window.html2canvas;
-            resolve(this.html2canvas);
-          }
-        }, 100);
-
-        // 设置检查超时
-        setTimeout(() => {
-          clearInterval(checkInterval);
-          if (!this.html2canvas) {
-            reject(new Error('html2canvas初始化超时'));
-          }
-        }, 5000);
-      };
-      
-      script.onerror = () => {
-        clearTimeout(timeout);
-        reject(new Error('html2canvas加载失败'));
-      };
-
-      document.head.appendChild(script);
-    });
-  }
-
   // 获取基础配置
   getBaseOptions(mode) {
     const baseOptions = {
@@ -119,9 +131,18 @@ class ScreenshotContent {
       removeContainer: true,
       imageTimeout: 15000,
       ignoreElements: (element) => {
+        // 忽略截图UI元素
         return element.classList.contains('screenshot-overlay') ||
                element.classList.contains('screenshot-selection') ||
-               element.classList.contains('screenshot-toast');
+               element.classList.contains('screenshot-toast') ||
+               element.classList.contains('screenshot-progress');
+      },
+      onclone: (clonedDoc) => {
+        // 处理克隆的文档
+        Array.from(clonedDoc.getElementsByTagName('iframe')).forEach(iframe => {
+          iframe.remove();
+        });
+        return Promise.resolve();
       }
     };
 
