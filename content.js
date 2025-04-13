@@ -1,116 +1,123 @@
 // 内容脚本
-console.log('[网页截图] 内容脚本已初始化');
+console.log('[网页截图] 内容脚本开始加载');
 
 class ScreenshotContent {
   constructor() {
+    console.log('[网页截图] 开始初始化ScreenshotContent类');
     this.html2canvas = null;
     this.previewUI = null;
     this.isCapturing = false;
     this.selectedArea = null;
     this.initMessageListener();
-    this.loadHtml2Canvas();
+    
+    // 等待DOM完全加载后再初始化html2canvas
+    if (document.readyState === 'complete') {
+      console.log('[网页截图] DOM已完全加载，直接初始化html2canvas');
+      this.initHtml2Canvas();
+    } else {
+      console.log('[网页截图] 等待DOM加载完成');
+      document.addEventListener('DOMContentLoaded', () => {
+        console.log('[网页截图] DOM加载完成事件触发');
+        this.initHtml2Canvas();
+      });
+    }
   }
 
   // 初始化消息监听
   initMessageListener() {
+    console.log('[网页截图] 初始化消息监听器');
     chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       console.log('[网页截图] 收到消息:', message);
       
       if (message.action === 'ping') {
+        console.log('[网页截图] 响应ping消息');
         sendResponse({ status: 'ok' });
         return true;
       }
 
       // 确保异步响应
       this.handleMessage(message).then(response => {
+        console.log('[网页截图] 消息处理完成，返回结果:', response);
         sendResponse(response);
       }).catch(error => {
         console.error('[网页截图] 消息处理错误:', error);
         sendResponse({ error: error.message });
       });
 
-      return true; // 保持消息通道开放
+      return true;
     });
   }
 
-  // 加载html2canvas
-  async loadHtml2Canvas() {
-    console.log('[网页截图] 开始加载html2canvas');
+  // 初始化html2canvas
+  async initHtml2Canvas() {
+    console.log('[网页截图] 开始初始化html2canvas');
     
     try {
       // 检查是否已经加载
-      if (document.querySelector('script[src*="html2canvas.js"]')) {
-        console.log('[网页截图] html2canvas脚本已存在');
-        await this.waitForHtml2Canvas();
+      if (window.html2canvas) {
+        console.log('[网页截图] html2canvas已存在于window对象');
+        this.html2canvas = window.html2canvas;
         return;
       }
 
       // 创建script标签
       const script = document.createElement('script');
-      script.src = chrome.runtime.getURL('lib/html2canvas.js');
+      script.src = chrome.runtime.getURL('lib/html2canvas.min.js');
+      console.log('[网页截图] 创建script标签，src:', script.src);
       
       // 等待脚本加载完成
       await new Promise((resolve, reject) => {
-        script.onload = async () => {
+        script.onload = () => {
           console.log('[网页截图] html2canvas脚本加载完成');
-          try {
-            await this.waitForHtml2Canvas();
+          if (window.html2canvas) {
+            console.log('[网页截图] html2canvas成功初始化');
+            this.html2canvas = window.html2canvas;
             resolve();
-          } catch (error) {
-            reject(error);
+          } else {
+            console.error('[网页截图] html2canvas加载后未找到');
+            reject(new Error('html2canvas加载后未找到'));
           }
         };
         
-        script.onerror = () => {
+        script.onerror = (error) => {
+          console.error('[网页截图] html2canvas脚本加载失败:', error);
           reject(new Error('html2canvas脚本加载失败'));
         };
 
         document.head.appendChild(script);
+        console.log('[网页截图] script标签已添加到head');
       });
 
       console.log('[网页截图] html2canvas初始化成功');
     } catch (error) {
-      console.error('[网页截图] html2canvas加载失败:', error);
+      console.error('[网页截图] html2canvas初始化失败:', error);
       throw error;
     }
   }
 
-  // 等待html2canvas初始化
-  async waitForHtml2Canvas(timeout = 5000) {
-    console.log('[网页截图] 等待html2canvas初始化');
-    
-    const startTime = Date.now();
-    
-    while (Date.now() - startTime < timeout) {
-      if (typeof window.html2canvas === 'function') {
-        this.html2canvas = window.html2canvas;
-        console.log('[网页截图] html2canvas已就绪');
-        return;
-      }
-      await new Promise(resolve => setTimeout(resolve, 100));
-    }
-    
-    throw new Error('html2canvas初始化超时');
-  }
-
   // 处理消息
   async handleMessage(message) {
-    console.log('[网页截图] 处理消息:', message.action);
+    console.log('[网页截图] 开始处理消息:', message.action);
 
     try {
       // 确保html2canvas已加载
       if (!this.html2canvas) {
-        await this.loadHtml2Canvas();
+        console.log('[网页截图] html2canvas未初始化，尝试初始化');
+        await this.initHtml2Canvas();
       }
 
       switch(message.action) {
         case 'capture':
+          console.log('[网页截图] 处理截图请求，模式:', message.mode);
           return await this.handleCapture(message.mode);
         case 'preview':
+          console.log('[网页截图] 处理预览请求');
           return await this.showPreview(message.dataUrl);
         case 'startSelection':
+          console.log('[网页截图] 处理区域选择请求');
           return await this.startAreaSelection();
         default:
+          console.error('[网页截图] 未知的操作类型:', message.action);
           throw new Error('未知的操作类型');
       }
     } catch (error) {
@@ -120,66 +127,10 @@ class ScreenshotContent {
     }
   }
 
-  // 获取基础配置
-  getBaseOptions(mode) {
-    const baseOptions = {
-      logging: true,
-      useCORS: true,
-      allowTaint: true,
-      backgroundColor: '#ffffff',
-      scale: window.devicePixelRatio || 1,
-      removeContainer: true,
-      imageTimeout: 15000,
-      ignoreElements: (element) => {
-        // 忽略截图UI元素
-        return element.classList.contains('screenshot-overlay') ||
-               element.classList.contains('screenshot-selection') ||
-               element.classList.contains('screenshot-toast') ||
-               element.classList.contains('screenshot-progress');
-      },
-      onclone: (clonedDoc) => {
-        // 处理克隆的文档
-        Array.from(clonedDoc.getElementsByTagName('iframe')).forEach(iframe => {
-          iframe.remove();
-        });
-        return Promise.resolve();
-      }
-    };
-
-    // 根据不同模式添加特定配置
-    switch (mode) {
-      case 'full':
-        return {
-          ...baseOptions,
-          windowWidth: document.documentElement.scrollWidth,
-          windowHeight: document.documentElement.scrollHeight,
-          width: document.documentElement.scrollWidth,
-          height: document.documentElement.scrollHeight,
-          scrollX: 0,
-          scrollY: 0,
-          x: 0,
-          y: 0
-        };
-      case 'visible':
-        return {
-          ...baseOptions,
-          windowWidth: window.innerWidth,
-          windowHeight: window.innerHeight,
-          width: window.innerWidth,
-          height: window.innerHeight,
-          scrollX: window.scrollX,
-          scrollY: window.scrollY,
-          x: window.scrollX,
-          y: window.scrollY
-        };
-      default:
-        return baseOptions;
-    }
-  }
-
   // 处理截图请求
   async handleCapture(mode) {
     if (this.isCapturing) {
+      console.log('[网页截图] 正在截图中，忽略新请求');
       throw new Error('正在截图中，请稍候...');
     }
 
@@ -210,6 +161,7 @@ class ScreenshotContent {
       await this.showPreview(imageData);
       return { success: true, data: imageData };
     } catch (error) {
+      console.error('[网页截图] 截图失败:', error);
       this.hideProgress();
       throw error;
     } finally {
@@ -220,10 +172,24 @@ class ScreenshotContent {
   // 截取可视区域
   async captureVisible() {
     console.log('[网页截图] 开始捕获可视区域');
-    const options = this.getBaseOptions('visible');
+    const options = {
+      logging: true,
+      useCORS: true,
+      allowTaint: true,
+      backgroundColor: '#ffffff',
+      scale: window.devicePixelRatio || 1,
+      width: window.innerWidth,
+      height: window.innerHeight,
+      x: window.scrollX,
+      y: window.scrollY,
+      windowWidth: window.innerWidth,
+      windowHeight: window.innerHeight
+    };
     
     try {
+      console.log('[网页截图] 调用html2canvas，配置:', options);
       const canvas = await this.html2canvas(document.documentElement, options);
+      console.log('[网页截图] 可视区域捕获成功');
       return canvas.toDataURL('image/png');
     } catch (error) {
       console.error('[网页截图] 可视区域捕获失败:', error);
@@ -231,70 +197,9 @@ class ScreenshotContent {
     }
   }
 
-  // 截取整个页面
-  async captureFull() {
-    console.log('[网页截图] 开始捕获完整页面');
-    
-    // 保存原始状态
-    const originalScroll = {
-      x: window.scrollX,
-      y: window.scrollY
-    };
-    const originalStyle = document.documentElement.style.cssText;
-
-    try {
-      // 禁用滚动和设置完整高度
-      document.documentElement.style.overflow = 'hidden';
-      document.documentElement.style.height = '100%';
-      document.body.style.overflow = 'hidden';
-      document.body.style.height = '100%';
-
-      const options = this.getBaseOptions('full');
-      const canvas = await this.html2canvas(document.documentElement, options);
-
-      return canvas.toDataURL('image/png');
-    } catch (error) {
-      console.error('[网页截图] 完整页面捕获失败:', error);
-      throw new Error('完整页面截图失败');
-    } finally {
-      // 恢复原始状态
-      document.documentElement.style.cssText = originalStyle;
-      document.body.style.cssText = '';
-      window.scrollTo(originalScroll.x, originalScroll.y);
-    }
-  }
-
-  // 截取选定区域
-  async captureArea(area) {
-    if (!area || !area.width || !area.height) {
-      throw new Error('无效的截图区域');
-    }
-
-    console.log('[网页截图] 开始捕获选定区域:', area);
-    
-    const options = {
-      ...this.getBaseOptions(),
-      width: area.width,
-      height: area.height,
-      x: area.left,
-      y: area.top,
-      scrollX: window.scrollX,
-      scrollY: window.scrollY,
-      windowWidth: document.documentElement.clientWidth,
-      windowHeight: document.documentElement.clientHeight
-    };
-
-    try {
-      const canvas = await this.html2canvas(document.documentElement, options);
-      return canvas.toDataURL('image/png');
-    } catch (error) {
-      console.error('[网页截图] 选定区域捕获失败:', error);
-      throw new Error('选定区域截图失败');
-    }
-  }
-
   // 显示进度提示
   showProgress(message) {
+    console.log('[网页截图] 显示进度:', message);
     if (!this.progressElement) {
       this.progressElement = document.createElement('div');
       this.progressElement.className = 'screenshot-progress';
@@ -317,6 +222,7 @@ class ScreenshotContent {
 
   // 隐藏进度提示
   hideProgress() {
+    console.log('[网页截图] 隐藏进度提示');
     if (this.progressElement) {
       this.progressElement.remove();
       this.progressElement = null;
@@ -325,6 +231,7 @@ class ScreenshotContent {
 
   // 显示提示信息
   showToast(message, type = 'info') {
+    console.log('[网页截图] 显示提示:', message, '类型:', type);
     if (!this.toastElement) {
       this.toastElement = document.createElement('div');
       this.toastElement.className = 'screenshot-toast';
@@ -357,4 +264,6 @@ class ScreenshotContent {
 }
 
 // 初始化内容脚本
+console.log('[网页截图] 创建ScreenshotContent实例');
 const screenshotContent = new ScreenshotContent();
+console.log('[网页截图] 内容脚本加载完成');
