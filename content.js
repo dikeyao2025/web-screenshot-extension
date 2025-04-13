@@ -8,126 +8,161 @@ class ScreenshotContent {
     this.isCapturing = false;
     this.selectedArea = null;
     this.initMessageListener();
-    this.initHtml2Canvas();
+    this.initHtml2Canvas().catch(error => {
+      console.error('[网页截图] 初始化失败:', error);
+    });
   }
 
   // 初始化消息监听
   initMessageListener() {
     chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-      console.log('[Content Debug] 收到消息: \n', message);
-      console.log('[Content Debug] 开始处理消息');
+      console.log('[网页截图] 收到消息:', message);
       
       if (message.action === 'ping') {
         sendResponse({ status: 'ok' });
         return true;
       }
 
-      this.handleMessage(message);
-      return true;
+      // 确保异步响应
+      this.handleMessage(message).then(response => {
+        sendResponse(response);
+      }).catch(error => {
+        console.error('[网页截图] 消息处理错误:', error);
+        sendResponse({ error: error.message });
+      });
+
+      return true; // 保持消息通道开放
     });
   }
 
   // 处理消息
   async handleMessage(message) {
-    if (!this.html2canvas && message.action !== 'preview') {
-      try {
-        await this.initHtml2Canvas();
-      } catch (error) {
-        console.error('[网页截图] 初始化失败:', error);
-        this.showToast('截图组件初始化失败，请刷新页面重试', 'error');
-        return;
-      }
-    }
+    console.log('[网页截图] 处理消息:', message.action);
 
-    switch(message.action) {
-      case 'capture':
-        this.handleCapture(message.mode);
-        break;
-      case 'preview':
-        this.showPreview(message.dataUrl);
-        break;
-      case 'startSelection':
-        this.startAreaSelection();
-        break;
+    try {
+      if (!this.html2canvas) {
+        await this.initHtml2Canvas();
+      }
+
+      switch(message.action) {
+        case 'capture':
+          return await this.handleCapture(message.mode);
+        case 'preview':
+          return await this.showPreview(message.dataUrl);
+        case 'startSelection':
+          return await this.startAreaSelection();
+        default:
+          throw new Error('未知的操作类型');
+      }
+    } catch (error) {
+      console.error('[网页截图] 操作失败:', error);
+      this.showToast(error.message || '操作失败，请重试', 'error');
+      throw error;
     }
   }
 
   // 初始化html2canvas
   async initHtml2Canvas() {
     if (this.html2canvas) {
+      console.log('[网页截图] html2canvas已初始化');
       return this.html2canvas;
     }
 
     console.log('[网页截图] 开始初始化html2canvas');
 
-    try {
+    return new Promise((resolve, reject) => {
       const script = document.createElement('script');
       script.src = chrome.runtime.getURL('lib/html2canvas.js');
       
-      await new Promise((resolve, reject) => {
-        script.onload = () => {
+      const timeout = setTimeout(() => {
+        reject(new Error('html2canvas加载超时'));
+      }, 10000);
+
+      script.onload = () => {
+        clearTimeout(timeout);
+        // 等待html2canvas真正初始化完成
+        const checkInterval = setInterval(() => {
           if (typeof window.html2canvas === 'function') {
-            console.log('[网页截图] html2canvas加载成功');
+            clearInterval(checkInterval);
+            console.log('[网页截图] html2canvas初始化成功');
             this.html2canvas = window.html2canvas;
-            resolve();
-          } else {
-            reject(new Error('html2canvas未正确初始化'));
+            resolve(this.html2canvas);
           }
-        };
-        
-        script.onerror = () => reject(new Error('html2canvas加载失败'));
-        document.head.appendChild(script);
-      });
+        }, 100);
+
+        // 设置检查超时
+        setTimeout(() => {
+          clearInterval(checkInterval);
+          if (!this.html2canvas) {
+            reject(new Error('html2canvas初始化超时'));
+          }
+        }, 5000);
+      };
       
-      return this.html2canvas;
-    } catch (error) {
-      console.error('[网页截图] html2canvas加载失败:', error);
-      throw error;
-    }
+      script.onerror = () => {
+        clearTimeout(timeout);
+        reject(new Error('html2canvas加载失败'));
+      };
+
+      document.head.appendChild(script);
+    });
   }
 
   // 获取基础配置
-  getBaseOptions() {
-    return {
-      // 基础设置
-      logging: true, // 启用日志以便调试
-      useCORS: true, // 允许跨域图片
-      allowTaint: true, // 允许跨域图片
-      backgroundColor: '#ffffff', // 设置白色背景
-      
-      // 渲染设置
-      scale: window.devicePixelRatio, // 设备像素比
-      foreignObjectRendering: false, // 禁用foreignObject渲染
-      removeContainer: true, // 移除临时容器
-      
-      // 图像设置
-      imageTimeout: 15000, // 图片加载超时时间
+  getBaseOptions(mode) {
+    const baseOptions = {
+      logging: true,
+      useCORS: true,
+      allowTaint: true,
+      backgroundColor: '#ffffff',
+      scale: window.devicePixelRatio || 1,
+      removeContainer: true,
+      imageTimeout: 15000,
       ignoreElements: (element) => {
-        // 忽略特定元素
         return element.classList.contains('screenshot-overlay') ||
                element.classList.contains('screenshot-selection') ||
-               element.classList.contains('screenshot-toast') ||
-               element.classList.contains('screenshot-progress');
-      },
-      
-      // 特性开关
-      onclone: (clonedDoc) => {
-        // 处理克隆的文档
-        Array.from(clonedDoc.getElementsByTagName('iframe')).forEach(iframe => {
-          iframe.remove();
-        });
-        return Promise.resolve();
+               element.classList.contains('screenshot-toast');
       }
     };
+
+    // 根据不同模式添加特定配置
+    switch (mode) {
+      case 'full':
+        return {
+          ...baseOptions,
+          windowWidth: document.documentElement.scrollWidth,
+          windowHeight: document.documentElement.scrollHeight,
+          width: document.documentElement.scrollWidth,
+          height: document.documentElement.scrollHeight,
+          scrollX: 0,
+          scrollY: 0,
+          x: 0,
+          y: 0
+        };
+      case 'visible':
+        return {
+          ...baseOptions,
+          windowWidth: window.innerWidth,
+          windowHeight: window.innerHeight,
+          width: window.innerWidth,
+          height: window.innerHeight,
+          scrollX: window.scrollX,
+          scrollY: window.scrollY,
+          x: window.scrollX,
+          y: window.scrollY
+        };
+      default:
+        return baseOptions;
+    }
   }
 
   // 处理截图请求
   async handleCapture(mode) {
     if (this.isCapturing) {
-      this.showToast('正在截图中，请稍候...', 'info');
-      return;
+      throw new Error('正在截图中，请稍候...');
     }
 
+    console.log('[网页截图] 开始截图，模式:', mode);
     this.isCapturing = true;
     this.showProgress('正在准备截图...');
 
@@ -152,10 +187,10 @@ class ScreenshotContent {
 
       this.hideProgress();
       await this.showPreview(imageData);
+      return { success: true, data: imageData };
     } catch (error) {
-      console.error('[截图] 截图失败:', error);
       this.hideProgress();
-      this.showToast(error.message || '截图失败，请重试', 'error');
+      throw error;
     } finally {
       this.isCapturing = false;
     }
@@ -164,26 +199,14 @@ class ScreenshotContent {
   // 截取可视区域
   async captureVisible() {
     console.log('[网页截图] 开始捕获可视区域');
+    const options = this.getBaseOptions('visible');
     
-    const options = {
-      ...this.getBaseOptions(),
-      width: window.innerWidth,
-      height: window.innerHeight,
-      windowWidth: window.innerWidth,
-      windowHeight: window.innerHeight,
-      x: window.scrollX,
-      y: window.scrollY,
-      scrollX: window.scrollX,
-      scrollY: window.scrollY
-    };
-
     try {
       const canvas = await this.html2canvas(document.documentElement, options);
-      console.log('[网页截图] 可视区域捕获完成');
       return canvas.toDataURL('image/png');
     } catch (error) {
       console.error('[网页截图] 可视区域捕获失败:', error);
-      throw error;
+      throw new Error('可视区域截图失败');
     }
   }
 
@@ -191,56 +214,32 @@ class ScreenshotContent {
   async captureFull() {
     console.log('[网页截图] 开始捕获完整页面');
     
-    // 保存原始滚动位置
-    const originalScrollPos = {
+    // 保存原始状态
+    const originalScroll = {
       x: window.scrollX,
       y: window.scrollY
     };
-
-    // 获取完整页面尺寸
-    const fullWidth = Math.max(
-      document.documentElement.scrollWidth,
-      document.documentElement.offsetWidth,
-      document.documentElement.clientWidth,
-      window.innerWidth
-    );
-    
-    const fullHeight = Math.max(
-      document.documentElement.scrollHeight,
-      document.documentElement.offsetHeight,
-      document.documentElement.clientHeight,
-      window.innerHeight
-    );
-
-    const options = {
-      ...this.getBaseOptions(),
-      width: fullWidth,
-      height: fullHeight,
-      windowWidth: fullWidth,
-      windowHeight: fullHeight,
-      x: 0,
-      y: 0,
-      scrollX: 0,
-      scrollY: 0
-    };
+    const originalStyle = document.documentElement.style.cssText;
 
     try {
-      // 临时禁用滚动
-      const originalStyle = document.body.style.cssText;
+      // 禁用滚动和设置完整高度
+      document.documentElement.style.overflow = 'hidden';
+      document.documentElement.style.height = '100%';
       document.body.style.overflow = 'hidden';
-      document.body.style.height = `${fullHeight}px`;
+      document.body.style.height = '100%';
 
+      const options = this.getBaseOptions('full');
       const canvas = await this.html2canvas(document.documentElement, options);
-      
-      // 恢复原始状态
-      document.body.style.cssText = originalStyle;
-      window.scrollTo(originalScrollPos.x, originalScrollPos.y);
 
-      console.log('[网页截图] 完整页面捕获完成');
       return canvas.toDataURL('image/png');
     } catch (error) {
       console.error('[网页截图] 完整页面捕获失败:', error);
-      throw error;
+      throw new Error('完整页面截图失败');
+    } finally {
+      // 恢复原始状态
+      document.documentElement.style.cssText = originalStyle;
+      document.body.style.cssText = '';
+      window.scrollTo(originalScroll.x, originalScroll.y);
     }
   }
 
@@ -256,28 +255,85 @@ class ScreenshotContent {
       ...this.getBaseOptions(),
       width: area.width,
       height: area.height,
-      windowWidth: document.documentElement.clientWidth,
-      windowHeight: document.documentElement.clientHeight,
       x: area.left,
       y: area.top,
       scrollX: window.scrollX,
-      scrollY: window.scrollY
+      scrollY: window.scrollY,
+      windowWidth: document.documentElement.clientWidth,
+      windowHeight: document.documentElement.clientHeight
     };
 
     try {
       const canvas = await this.html2canvas(document.documentElement, options);
-      console.log('[网页截图] 选定区域捕获完成');
       return canvas.toDataURL('image/png');
     } catch (error) {
       console.error('[网页截图] 选定区域捕获失败:', error);
-      throw error;
+      throw new Error('选定区域截图失败');
     }
   }
 
-  // 其他方法保持不变...
+  // 显示进度提示
+  showProgress(message) {
+    if (!this.progressElement) {
+      this.progressElement = document.createElement('div');
+      this.progressElement.className = 'screenshot-progress';
+      this.progressElement.style.cssText = `
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        background: rgba(0, 0, 0, 0.8);
+        color: white;
+        padding: 15px 30px;
+        border-radius: 5px;
+        z-index: 999999;
+        font-family: system-ui;
+      `;
+      document.body.appendChild(this.progressElement);
+    }
+    this.progressElement.textContent = message;
+  }
+
+  // 隐藏进度提示
+  hideProgress() {
+    if (this.progressElement) {
+      this.progressElement.remove();
+      this.progressElement = null;
+    }
+  }
+
+  // 显示提示信息
+  showToast(message, type = 'info') {
+    if (!this.toastElement) {
+      this.toastElement = document.createElement('div');
+      this.toastElement.className = 'screenshot-toast';
+      this.toastElement.style.cssText = `
+        position: fixed;
+        bottom: 20px;
+        left: 50%;
+        transform: translateX(-50%);
+        padding: 10px 20px;
+        border-radius: 4px;
+        color: white;
+        font-family: system-ui;
+        z-index: 999999;
+        transition: opacity 0.3s;
+      `;
+      document.body.appendChild(this.toastElement);
+    }
+
+    this.toastElement.style.background = type === 'error' ? '#ff4444' : '#333';
+    this.toastElement.textContent = message;
+
+    clearTimeout(this.toastTimeout);
+    this.toastTimeout = setTimeout(() => {
+      if (this.toastElement) {
+        this.toastElement.remove();
+        this.toastElement = null;
+      }
+    }, 3000);
+  }
 }
 
-// PreviewUI类和AreaSelector类的代码保持不变...
-
 // 初始化内容脚本
-new ScreenshotContent();
+const screenshotContent = new ScreenshotContent();
